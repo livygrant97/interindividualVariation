@@ -1,231 +1,200 @@
+###############################################################
+# mQTL-TAD-loop overlap analysis
+# Olivia Grant
+###############################################################
 
-# read in tad data 
-tadsBloodHicExplorerTwo <- read.table("/home/og16379/VaryingDNAm/data/hicExplorer2/livHiC_min30000_max60000_step40000_thres0.05_delta0.01_fdr_domains.bed")
-colnames(tadsBloodHicExplorerTwo) <- c("chr","start","end","V4","tadSeperationScore","strand","start1","end1","V9")
-tadsBloodHicExplorerTwo <- makeGRangesFromDataFrame(tadsBloodHicExplorerTwo,keep.extra.columns=TRUE)
-seqlevelsStyle(tadsBloodHicExplorerTwo) <- "UCSC"
-tadsBloodHicExplorerTwo$TADID <- seq(1,length(tadsBloodHicExplorerTwo))
-# read in mqtl and probe data 
-mqtl <- get(load("/home/og16379/VaryingDNAm/data/AllmQTL_Unrelated_with10PCs_1e-10.rdata"))
-load("/home/og16379/VaryingDNAm/objects/replicatedResultsVariable.RData")
-load("/home/og16379/VaryingDNAm/objects/replicatedResultsStable.RData")
+#### SETUP: Paths, Data, and Libraries
 
-# get granges for snp and cpg pairs
-getAllSnpCpgPairs <- function(mqtlAnno,probesOfInterest){
-pairedData <- subset(mqtlAnno,gene %in% probesOfInterest)
-pairedData <- as.data.frame(pairedData %>% distinct(gene,.keep_all=TRUE))
-convertToGIIndeces <- function(df, mode="reverse"){
-row.regions <- GRanges(df[,1], IRanges(df[,2],df[,2]))# interaction start
-col.regions <- GRanges(df[,9], IRanges(df[,10],df[,10]))# interaction end
-gi <- GInteractions(1:length(row.regions),(length(row.regions)+1):(length(row.regions)+length(col.regions)), c(row.regions,col.regions), mcols=list(df[,5:22]),mode=mode)
-giAnchors <- anchors(gi)
-gi$distClass = ifelse(distance(giAnchors$first, giAnchors$second) <=500, distClass  <- "cisMqtl",distClass <- "transMqtl")
-return(gi)
+# Define file paths
+tad_file <- "/home/og16379/VaryingDNAm/data/hicExplorer2/livHiC_min30000_max60000_step40000_thres0.05_delta0.01_fdr_domains.bed"
+mqtl_file <- "/home/og16379/VaryingDNAm/data/AllmQTL_Unrelated_with10PCs_1e-10.rdata"
+rep_var_file <- "/home/og16379/VaryingDNAm/objects/replicatedResultsVariable.RData"
+rep_stable_file <- "/home/og16379/VaryingDNAm/objects/replicatedResultsStable.RData"
+plot_dir <- "/home/og16379/VaryingDNAm/plots"
+
+# Load TADs and convert to GRanges
+tads <- read.table(tad_file)
+colnames(tads) <- c("chr", "start", "end", "V4", "tadScore", "strand", "start1", "end1", "V9")
+tads <- makeGRangesFromDataFrame(tads, keep.extra.columns = TRUE)
+seqlevelsStyle(tads) <- "UCSC"
+tads$TADID <- seq_along(tads)
+
+# Load mQTL and probe sets
+load(mqtl_file)
+load(rep_var_file)
+load(rep_stable_file)
+
+#### FUNCTIONS
+
+# Create GInteractions for SNP–CpG pairs
+getAllSnpCpgPairs <- function(mqtlAnno, probesOfInterest) {
+  paired <- subset(mqtlAnno, gene %in% probesOfInterest) %>%
+    distinct(gene, .keep_all = TRUE) %>%
+    as.data.frame()
+
+  rowGR <- GRanges(paired[,1], IRanges(paired[,2], paired[,2]))
+  colGR <- GRanges(paired[,9], IRanges(paired[,10], paired[,10]))
+  
+  gi <- GInteractions(seq_along(rowGR), length(rowGR) + seq_along(colGR),
+                      c(rowGR, colGR), mcols = list(paired[,5:22]), mode = "reverse")
+  
+  anchors <- anchors(gi)
+  gi$distClass <- ifelse(distance(anchors$first, anchors$second) <= 500, "cisMqtl", "transMqtl")
+  seqlevelsStyle(gi) <- "UCSC"
+  return(gi)
 }
-pairedData <- convertToGIIndeces(pairedData)
-seqlevelsStyle(pairedData) <-"UCSC"
-return(pairedData)
-}
 
-
-# apply function to both sets
-backgroundProbes <- annotationTable$Name
-chanceMqtl <- getAllSnpCpgPairs(mqtl,backgroundProbes)
-variableMqtl <- getAllSnpCpgPairs(mqtl,replicatedResultsVariable)
-stableMqtl <- getAllSnpCpgPairs(mqtl,replicatedResultsStable)
-epiAlleleMqtl <- getAllSnpCpgPairs(mqtl,epiAllelesImVAtCleaned$Name)
-
-
-
+# Check if anchors fall outside any TADs
 anchorsInNoTads <- function(mqtlAnno, probesOfInterest, tads) {
-  anchorBoth <- mqtlAnno[mqtlAnno$gene %in% probesOfInterest, ]
-  anchorBoth <- unique(anchorBoth, by = "gene")
-  anchorOne <- GRanges(anchorBoth$chrom, IRanges(anchorBoth$start, anchorBoth$start))
-  anchorTwo <- GRanges(anchorBoth$chrom2, IRanges(anchorBoth$start2, anchorBoth$start2))
-  seqlevelsStyle(anchorOne) <- "UCSC"
-  seqlevelsStyle(anchorTwo) <- "UCSC"
-  olapA1 <- findOverlaps(anchorOne, tads)
-  olapA2 <- findOverlaps(anchorTwo, tads)
-  anchorOneTAD <- rep(0, length(anchorOne))
-  anchorTwoTAD <- rep(0, length(anchorTwo))
-  anchorOneTAD[queryHits(olapA1)] <- subjectHits(olapA1)
-  anchorTwoTAD[queryHits(olapA2)] <- subjectHits(olapA2)
-  ids_noTAD <- anchorOneTAD == 0 | anchorTwoTAD == 0
-  mqtlsInNoTads <- anchorBoth[ids_noTAD, ]
-  return(ids_noTAD)
+  anchors <- subset(mqtlAnno, gene %in% probesOfInterest) %>% unique(by = "gene")
+  a1 <- GRanges(anchors$chrom, IRanges(anchors$start, anchors$start))
+  a2 <- GRanges(anchors$chrom2, IRanges(anchors$start2, anchors$start2))
+  seqlevelsStyle(a1) <- "UCSC"
+  seqlevelsStyle(a2) <- "UCSC"
+
+  olap1 <- findOverlaps(a1, tads)
+  olap2 <- findOverlaps(a2, tads)
+
+  inTAD1 <- integer(length(a1))
+  inTAD2 <- integer(length(a2))
+  inTAD1[queryHits(olap1)] <- subjectHits(olap1)
+  inTAD2[queryHits(olap2)] <- subjectHits(olap2)
+
+  return(inTAD1 == 0 | inTAD2 == 0)
 }
 
-
+# Check if both anchors fall in the same TAD
 anchorsInSameTads <- function(mqtlAnno, probesOfInterest, tads) {
-  anchorBoth <- mqtlAnno[mqtlAnno$gene %in% probesOfInterest, ]
-  anchorBoth <- unique(anchorBoth, by = "gene")
-  anchorOne <- GRanges(anchorBoth$chrom, IRanges(anchorBoth$start, anchorBoth$start))
-  anchorTwo <- GRanges(anchorBoth$chrom2, IRanges(anchorBoth$start2, anchorBoth$start2))
-  seqlevelsStyle(anchorOne) <- "UCSC"
-  seqlevelsStyle(anchorTwo) <- "UCSC"
-  olapA1 <- findOverlaps(anchorOne, tads)
-  olapA2 <- findOverlaps(anchorTwo, tads)
-  anchorOneTAD <- rep(0, length(anchorOne))
-  anchorTwoTAD <- rep(0, length(anchorTwo))
-  anchorOneTAD[queryHits(olapA1)] <- subjectHits(olapA1)
-  anchorTwoTAD[queryHits(olapA2)] <- subjectHits(olapA2)
-  ids_sameTAD <- anchorOneTAD != 0 & anchorOneTAD == anchorTwoTAD
-  mqtlsInSameTads <- anchorBoth[ids_sameTAD, ]
-  return(ids_sameTAD)
+  anchors <- subset(mqtlAnno, gene %in% probesOfInterest) %>% unique(by = "gene")
+  a1 <- GRanges(anchors$chrom, IRanges(anchors$start, anchors$start))
+  a2 <- GRanges(anchors$chrom2, IRanges(anchors$start2, anchors$start2))
+  seqlevelsStyle(a1) <- "UCSC"
+  seqlevelsStyle(a2) <- "UCSC"
+
+  olap1 <- findOverlaps(a1, tads)
+  olap2 <- findOverlaps(a2, tads)
+
+  inTAD1 <- integer(length(a1))
+  inTAD2 <- integer(length(a2))
+  inTAD1[queryHits(olap1)] <- subjectHits(olap1)
+  inTAD2[queryHits(olap2)] <- subjectHits(olap2)
+
+  return(inTAD1 != 0 & inTAD1 == inTAD2)
 }
 
-variableMqtl$inSameTad = anchorsInSameTads(mqtl,replicatedResultsVariable,tadsBloodHicExplorerTwo)
-stableMqtl$inSameTad = anchorsInSameTads(mqtl,replicatedResultsStable,tadsBloodHicExplorerTwo)
-chanceMqtl$inSameTad = anchorsInSameTads(mqtl,backgroundProbes,tadsBloodHicExplorerTwo)
+#### APPLY: mQTL Sets
+backgroundProbes <- annotationTable$Name
+chanceMqtl   <- getAllSnpCpgPairs(mqtl, backgroundProbes)
+variableMqtl <- getAllSnpCpgPairs(mqtl, replicatedResultsVariable)
+stableMqtl   <- getAllSnpCpgPairs(mqtl, replicatedResultsStable)
+epiAlleleMqtl <- getAllSnpCpgPairs(mqtl, epiAllelesImVAtCleaned$Name)
 
-variableMqtl$inNoTad = anchorsInNoTads(mqtl,replicatedResultsVariable,tadsBloodHicExplorerTwo)
-stableMqtl$inNoTad = anchorsInNoTads(mqtl,replicatedResultsStable,tadsBloodHicExplorerTwo)
-chanceMqtl$inNoTad = anchorsInNoTads(mqtl,backgroundProbes,tadsBloodHicExplorerTwo)
+# Annotate overlaps
+variableMqtl$inSameTad <- anchorsInSameTads(mqtl, replicatedResultsVariable, tads)
+stableMqtl$inSameTad   <- anchorsInSameTads(mqtl, replicatedResultsStable, tads)
+chanceMqtl$inSameTad   <- anchorsInSameTads(mqtl, backgroundProbes, tads)
 
-# Function to calculate the counts for each category
-calculateCounts <- function(df, inSameTadCol, inNoTadCol, distClassCol) {
-  counts <- matrix(0, 3, 3)
-  counts[1, 1] <- length(which(df[[inSameTadCol]] & df[[distClassCol]] == "transMqtl"))
-  counts[1, 2] <- length(which(df[[inSameTadCol]] & df[[distClassCol]] == "cisMqtl"))
-  counts[1, 3] <- length(which(df[[inSameTadCol]]))
-  counts[2, 1] <- length(which(!df[[inSameTadCol]] & !df[[inNoTadCol]] & df[[distClassCol]] == "transMqtl"))
-  counts[2, 2] <- length(which(!df[[inSameTadCol]] & !df[[inNoTadCol]] & df[[distClassCol]] == "cisMqtl"))
-  counts[2, 3] <- length(which(!df[[inSameTadCol]] & !df[[inNoTadCol]]))
-  counts[3, 1] <- length(which(!df[[inSameTadCol]] & df[[inNoTadCol]] & df[[distClassCol]] == "transMqtl"))
-  counts[3, 2] <- length(which(!df[[inSameTadCol]] & df[[inNoTadCol]] & df[[distClassCol]] == "cisMqtl"))
-  counts[3, 3] <- length(which(!df[[inSameTadCol]] & df[[inNoTadCol]]))
-  counts
+variableMqtl$inNoTad <- anchorsInNoTads(mqtl, replicatedResultsVariable, tads)
+stableMqtl$inNoTad   <- anchorsInNoTads(mqtl, replicatedResultsStable, tads)
+chanceMqtl$inNoTad   <- anchorsInNoTads(mqtl, backgroundProbes, tads)
+
+#### LOOP CONNECTIVITY (assumes `loopsGi` already exists)
+
+# Check if both anchors fall outside loops
+anchorsNotConnectedByLoops <- function(mqtlAnno, probesOfInterest, loops) {
+  anchors <- subset(mqtlAnno, gene %in% probesOfInterest) %>% distinct(gene, .keep_all = TRUE)
+  a1 <- GRanges(anchors[,1], IRanges(anchors[,2], anchors[,2]))
+  a2 <- GRanges(anchors[,9], IRanges(anchors[,10], anchors[,10]))
+  seqlevelsStyle(a1) <- "UCSC"
+  seqlevelsStyle(a2) <- "UCSC"
+
+  olap1 <- findOverlaps(a1, loops)
+  olap2 <- findOverlaps(a2, loops)
+
+  l1 <- integer(length(a1))
+  l2 <- integer(length(a2))
+  l1[queryHits(olap1)] <- subjectHits(olap1)
+  l2[queryHits(olap2)] <- subjectHits(olap2)
+
+  return(l1 == 0 & l2 == 0)
 }
 
-# Function to calculate the percentage
+# Check if both anchors fall in the same loop
+anchorsConnectedByLoops <- function(mqtlAnno, probesOfInterest, loops) {
+  anchors <- subset(mqtlAnno, gene %in% probesOfInterest) %>% distinct(gene, .keep_all = TRUE)
+  a1 <- GRanges(anchors[,1], IRanges(anchors[,2], anchors[,2]))
+  a2 <- GRanges(anchors[,9], IRanges(anchors[,10], anchors[,10]))
+  seqlevelsStyle(a1) <- "UCSC"
+  seqlevelsStyle(a2) <- "UCSC"
+
+  olap1 <- findOverlaps(a1, loops)
+  olap2 <- findOverlaps(a2, loops)
+
+  l1 <- integer(length(a1))
+  l2 <- integer(length(a2))
+  l1[queryHits(olap1)] <- subjectHits(olap1)
+  l2[queryHits(olap2)] <- subjectHits(olap2)
+
+  return(l1 != 0 & l1 == l2)
+}
+
+# Apply to sets
+stableMqtl$cbLoop   <- anchorsConnectedByLoops(mqtl, replicatedResultsStable, loopsGi)
+variableMqtl$cbLoop <- anchorsConnectedByLoops(mqtl, replicatedResultsVariable, loopsGi)
+chanceMqtl$cbLoop   <- anchorsConnectedByLoops(mqtl, backgroundProbes, loopsGi)
+
+stableMqtl$noLoop   <- anchorsNotConnectedByLoops(mqtl, replicatedResultsStable, loopsGi)
+variableMqtl$noLoop <- anchorsNotConnectedByLoops(mqtl, replicatedResultsVariable, loopsGi)
+chanceMqtl$noLoop   <- anchorsNotConnectedByLoops(mqtl, backgroundProbes, loopsGi)
+
+#### ANALYSIS AND PLOTTING
+
+# Count matrix based on overlap type
+calculateCounts <- function(df, groupCol1, groupCol2, classCol) {
+  m <- matrix(0, 3, 3)
+  m[1,1] <- sum(df[[groupCol1]] & df[[classCol]] == "transMqtl")
+  m[1,2] <- sum(df[[groupCol1]] & df[[classCol]] == "cisMqtl")
+  m[1,3] <- sum(df[[groupCol1]])
+
+  m[2,1] <- sum(!df[[groupCol1]] & !df[[groupCol2]] & df[[classCol]] == "transMqtl")
+  m[2,2] <- sum(!df[[groupCol1]] & !df[[groupCol2]] & df[[classCol]] == "cisMqtl")
+  m[2,3] <- sum(!df[[groupCol1]] & !df[[groupCol2]])
+
+  m[3,1] <- sum(!df[[groupCol1]] & df[[groupCol2]] & df[[classCol]] == "transMqtl")
+  m[3,2] <- sum(!df[[groupCol1]] & df[[groupCol2]] & df[[classCol]] == "cisMqtl")
+  m[3,3] <- sum(!df[[groupCol1]] & df[[groupCol2]])
+  m
+}
+
+# Convert counts to percentages
 calculatePercentage <- function(counts) {
-  apply(counts, 2, function(x) x * 100 / sum(x, na.rm = TRUE))
+  apply(counts, 2, function(x) 100 * x / sum(x))
 }
 
-# Function to create the barplot
+# Save barplot to file
 createBarplot <- function(results, title, legendNames) {
-  pdf(paste0("/home/og16379/VaryingDNAm/plots/groupedBar", title, ".pdf"))
-  par(mar = c(4, 4, 4, 10.5))
-  par(xpd = NA)
+  pdf(file.path(plot_dir, paste0("groupedBar", title, ".pdf")))
+  par(mar = c(4, 4, 4, 10.5), xpd = NA)
   barplot(results, col = cbbPalette[5:7], border = "white", cex.names = 0.4, ylim = c(0, 100), beside = TRUE)
-  legend(3.7, 70, legendNames, fill = cbbPalette[5:6], bty = "n")
+  legend("topright", legend = legendNames, fill = cbbPalette[5:6], bty = "n")
   dev.off()
 }
 
-# Calculate counts and percentages for All data
-resultsMqtlAll <- calculateCounts(variableMqtl, "inSameTad", "inNoTad", "distClass")
-resultsMqtlPercentageAll <- calculatePercentage(resultsMqtlAll)
-createBarplot(resultsMqtlPercentageAll, "All", rownames(resultsMqtlPercentageAll))
-
-# Calculate counts and percentages for trans data
-resultsMqtlTrans <- calculateCounts(variableMqtl, "inSameTad", "inNoTad", "distClass")
-resultsMqtlPercentageTrans <- calculatePercentage(resultsMqtlTrans)
-createBarplot(resultsMqtlPercentageTrans, "Trans", rownames(resultsMqtlPercentageTrans))
-
-# Calculate counts and percentages for cis data
-resultsMqtlcis <- calculateCounts(variableMqtl, "inSameTad", "inNoTad", "distClass")
-resultsMqtlPercentagecis <- calculatePercentage(resultsMqtlcis)
-createBarplot(resultsMqtlPercentagecis, "cis", rownames(resultsMqtlPercentagecis))
-
-
-# now check if connected by loops
-anchorsNotConnectedByLoops <- function(mqtlAnno,probesOfInterest,loopsGi){
-anchorBoth <- subset(mqtl,gene %in% probesOfInterest)
-anchorBoth <- as.data.frame(anchorBoth %>% distinct(gene,.keep_all=TRUE))
-anchorOne <- GRanges(anchorBoth[,1], IRanges(anchorBoth[,2],anchorBoth[,2]))# interaction start
-anchorTwo <- GRanges(anchorBoth[,9], IRanges(anchorBoth[,10],anchorBoth[,10]))# interaction start
-seqlevelsStyle(anchorOne) <- "UCSC"
-seqlevelsStyle(anchorTwo) <- "UCSC"
-olapA1 <- findOverlaps(anchorOne, loopsGi)
-olapA2 <- findOverlaps(anchorTwo, loopsGi)
-anchorOneLoop <- rep(0, length(anchorOne))
-anchorTwoLoop <- rep(0, length(anchorTwo))
-anchorOneLoop[queryHits(olapA1)] <- subjectHits(olapA1)
-anchorTwoLoop[queryHits(olapA2)] <- subjectHits(olapA2)
-ids_noLoop <- anchorOneLoop==0 & anchorTwoLoop == 0
-return(ids_noLoop)
+# Apply barplot pipeline
+makeAllPlots <- function(df, suffix) {
+  counts <- calculateCounts(df, "cbLoop", "noLoop", "distClass")
+  perc <- calculatePercentage(counts)
+  createBarplot(perc, paste0("Loops", suffix), rownames(perc))
 }
 
+makeAllPlots(variableMqtl, "All")
+makeAllPlots(variableMqtl, "Trans")
+makeAllPlots(variableMqtl, "cis")
 
-stableMqtl$noLoop <- anchorsNotConnectedByLoops(mqtl,replicatedResultsStable,loopsGi)
-variableMqtl$noLoop <- anchorsNotConnectedByLoops(mqtl,replicatedResultsVariable,loopsGi)
-chanceMqtl$noLoop <- anchorsNotConnectedByLoops(mqtl,backgroundProbes,loopsGi)
-
-
-# now check if connected by loops
-anchorsConnectedByLoops <- function(mqtlAnno,probesOfInterest,loopsGi){
-anchorBoth <- subset(mqtl,gene %in% probesOfInterest)
-anchorBoth <- as.data.frame(anchorBoth %>% distinct(gene,.keep_all=TRUE))
-anchorOne <- GRanges(anchorBoth[,1], IRanges(anchorBoth[,2],anchorBoth[,2]))# interaction start
-anchorTwo <- GRanges(anchorBoth[,9], IRanges(anchorBoth[,10],anchorBoth[,10]))# interaction start
-seqlevelsStyle(anchorOne) <- "UCSC"
-seqlevelsStyle(anchorTwo) <- "UCSC"
-olapA1 <- findOverlaps(anchorOne, loopsGi)
-olapA2 <- findOverlaps(anchorTwo, loopsGi)
-anchorOneLoop <- rep(0, length(anchorOne))
-anchorTwoLoop <- rep(0, length(anchorTwo))
-anchorOneLoop[queryHits(olapA1)] <- subjectHits(olapA1)
-anchorTwoLoop[queryHits(olapA2)] <- subjectHits(olapA2)
-ids_noLoop <- anchorOneLoop!=0 & anchorOneLoop == anchorTwoLoop
-return(ids_noLoop)
-}
-
-
-stableMqtl$cbLoop <- anchorsConnectedByLoops(mqtl,replicatedResultsStable,loopsGi)
-variableMqtl$cbLoop <- anchorsConnectedByLoops(mqtl,replicatedResultsVariable,loopsGi)
-chanceMqtl$cbLoop <- anchorsConnectedByLoops(mqtl,backgroundProbes,loopsGi)
-
-
-# Function to calculate counts for different datasets
-calculateCounts <- function(df, cbLoopCol, noLoopCol, distClassCol) {
-  counts <- matrix(0, 3, 3)
-  counts[1, 1] <- sum(df[[cbLoopCol]] & df[[distClassCol]] == "transMqtl")
-  counts[1, 2] <- sum(df[[cbLoopCol]] & df[[distClassCol]] == "cisMqtl")
-  counts[1, 3] <- sum(df[[cbLoopCol]])
-  counts[2, 1] <- sum(!df[[cbLoopCol]] & !df[[noLoopCol]] & df[[distClassCol]] == "transMqtl")
-  counts[2, 2] <- sum(!df[[cbLoopCol]] & !df[[noLoopCol]] & df[[distClassCol]] == "cisMqtl")
-  counts[2, 3] <- sum(!df[[cbLoopCol]] & !df[[noLoopCol]])
-  counts[3, 1] <- sum(!df[[cbLoopCol]] & df[[noLoopCol]] & df[[distClassCol]] == "transMqtl")
-  counts[3, 2] <- sum(!df[[cbLoopCol]] & df[[noLoopCol]] & df[[distClassCol]] == "cisMqtl")
-  counts[3, 3] <- sum(!df[[cbLoopCol]] & df[[noLoopCol]])
-  counts
-}
-
-# Function to calculate percentages
-calculatePercentage <- function(counts) {
-  apply(counts, 2, function(x) x * 100 / sum(x, na.rm = TRUE))
-}
-
-# Function to create barplots
-createBarplot <- function(results, title, legendNames) {
-  pdf(paste0("/home/og16379/VaryingDNAm/plots/groupedBar", title, ".pdf"))
-  par(mar = c(4, 4, 4, 10.5))
-  par(xpd = NA)
-  barplot(results, col = cbbPalette[5:7], border = "white", cex.names = 0.4, ylim = c(0, 100), beside = TRUE)
-  legend(3.7, 70, legendNames, fill = cbbPalette[5:6], bty = "n")
-  dev.off()
-}
-
-# Calculate counts and percentages for All data
-resultsMqtlAllLoops <- calculateCounts(variableMqtl, "cbLoop", "noLoop", "distClass")
-resultsMqtlAllLoopsPercentage <- calculatePercentage(resultsMqtlAllLoops)
-createBarplot(resultsMqtlAllLoopsPercentage, "LoopsAll", rownames(resultsMqtlAllLoopsPercentage))
-
-# Calculate counts and percentages for trans data
-resultsMqtlTransLoops <- calculateCounts(variableMqtl, "cbLoop", "noLoop", "distClass")
-resultsMqtlTransLoopsPercentage <- calculatePercentage(resultsMqtlTransLoops)
-createBarplot(resultsMqtlTransLoopsPercentage, "LoopsTrans", rownames(resultsMqtlTransLoopsPercentage))
-
-# Calculate counts and percentages for cis data
-resultsMqtlcisLoops <- calculateCounts(variableMqtl, "cbLoop", "noLoop", "distClass")
-resultsMqtlcisLoopsPercentage <- calculatePercentage(resultsMqtlcisLoops)
-createBarplot(resultsMqtlcisLoopsPercentage, "Loopscis", rownames(resultsMqtlcisLoopsPercentage))
-
-# Calculate counts and percentages for epiallele mQTL relationship
-resultsMqtlEpi <- matrix(0, 1, 3)
-resultsMqtlEpi[1, 1] <- nrow(subset(epiAllelesImVAtCleaned, Name %!in% mqtl$gene))
-resultsMqtlEpi[1, 2] <- sum(epiAlleleMqtl@elementMetadata@listData$distClass == "cisMqtl")
-resultsMqtlEpi[1, 3] <- sum(epiAlleleMqtl@elementMetadata@listData$distClass == "transMqtl")
-resultsMqtlEpiPercentage <- calculatePercentage(resultsMqtlEpi)
-createBarplot(resultsMqtlEpiPercentage, "epiMqtlRel", colnames(resultsMqtlEpiPercentage))
-
+# Plot for epialleles
+epiResults <- matrix(0, 1, 3)
+epiResults[1, 1] <- sum(epiAllelesImVAtCleaned$Name %!in% mqtl$gene)
+epiResults[1, 2] <- sum(epiAlleleMqtl@elementMetadata@listData$distClass == "cisMqtl")
+epiResults[1, 3] <- sum(epiAlleleMqtl@elementMetadata@listData$distClass == "transMqtl")
+epiPerc <- calculatePercentage(epiResults)
+createBarplot(epiPerc, "epiMqtlRel", colnames(epiPerc))
